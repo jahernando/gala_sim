@@ -51,8 +51,8 @@ DIFF_TRANS_DRIFT   = 0.05           # cm/√cm — drift region (100 V/cm)
 DIFF_TRANS_EL      = 0.01           # cm/√cm — EL region (4800 V/cm)
 
 # ─── Simulation parameters ───────────────────────────────────────
-N_ELECTRONS        = 100
-DISK_RADIUS_CM     = HOLE_PITCH_CM  # 1.0 cm — generation disk radius
+N_ELECTRONS        = 10000
+DISK_RADIUS_CM     = HOLE_PITCH_CM - HOLE_RADIUS_CM  # 0.75 cm — no electron over neighbor hole
 STEP_SIZE_CM       = 0.002          # Δz per step [cm]
 N_TRAJECTORY_SAVE  = 40             # trajectory points saved per electron
 SEED               = 42
