@@ -58,6 +58,12 @@ inside hole → Geant4 VUV photon propagation → SiPM acceptance.
 - Future: user may provide detailed electric field map (potential) to replace uniform fields
 - Pressure is parameterizable for scans at 4, 10, 13.5 bar
 
+## Pending Tasks
+
+- [ ] Integrate detailed electric field map (potential) into `el_simulation.py` — replace uniform drift/EL fields with interpolated E-field from user-provided map. This should show funneling of electrons into the hole and increase geometric acceptance beyond 12.7%.
+- [ ] Pressure scans at 10 bar and 13.5 bar
+- [ ] Explore different hole geometries (larger diameter, smaller pitch)
+
 ## Dependencies
 
 ```bash
