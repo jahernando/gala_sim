@@ -1,0 +1,21 @@
+# Build
+build/
+
+# Generated data & plots
+el_electrons.json
+*.png
+*.root
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+*_executed.ipynb
+
+# Claude Code
+.claude/
