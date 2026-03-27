@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-NEXT Honeycomb Cell — Electron Drift & EL Simulation
-=====================================================
-Simulates electron drift through two regions:
-  1. Drift region (above hole): uniform drift field, no EL
-  2. EL region (inside hole): strong EL field, photon production
+NEXT Honeycomb Cell — Electron Drift & EL Simulation (COMSOL field)
+====================================================================
+Simulates electron drift using the interpolated COMSOL E-field map.
 
-Electrons start uniformly distributed in a disk of radius = pitch (10 mm)
-centred on the hole, at z = 2 cm from the SiPM (hole bottom).
+Coordinate system (hole-centered):
+  y = 0       : anode mesh (SiPM below)
+  y ~ 0.3 cm  : top electrode of MTHGEM plate
+  y = Y_START : electron generation plane (default 1.0 cm = 10 mm)
+  (x', z')   : transverse plane, central hole at origin
 
-Coordinate system:
-  z = 0       : SiPM plane (hole bottom)
-  z = 0.5 cm  : hole top (anode plane)
-  z = 2.0 cm  : electron start
+Electrons drift along -y (from Y_START toward y=0).
+The E-field has 3 components (Ex, Ey, Ez) from the COMSOL map,
+providing funneling of electrons into the hole.
 
 Output: el_electrons.json with trajectories and excitation points.
 """
@@ -20,40 +20,31 @@ Output: el_electrons.json with trajectories and excitation points.
 import numpy as np
 import json
 import os
+from field_map import FieldMap
 
-# ─── Pressure & Fields ───────────────────────────────────────────
+# ─── Pressure & EL yield ────────────────────────────────────────
 PRESSURE_BAR       = 4.0            # bar
-EL_REDUCED_FIELD   = 1.2            # kV/(cm·bar) — reduced EL field
-DRIFT_FIELD_V_CM   = 100.0          # V/cm — drift field above hole
-EL_FIELD_V_CM      = EL_REDUCED_FIELD * 1e3 * PRESSURE_BAR  # V/cm (4800 at 4 bar)
-
-# ─── Hole geometry ────────────────────────────────────────────────
-HOLE_RADIUS_CM     = 0.25           # 2.5 mm radius (5 mm diameter)
-HOLE_HEIGHT_CM     = 0.50           # 5 mm height (EL gap)
-HOLE_PITCH_CM      = 1.00           # 10 mm hexagonal pitch
-
-# ─── Drift geometry ──────────────────────────────────────────────
-Z_SIPM             = 0.0            # z of SiPM (hole bottom)
-Z_HOLE_TOP         = HOLE_HEIGHT_CM # z of hole top = 0.5 cm
-Z_ELECTRON_START   = 2.0            # z where electrons start = 2.0 cm
-DRIFT_LENGTH_CM    = Z_ELECTRON_START - Z_HOLE_TOP  # 1.5 cm of drift
-
-# ─── EL yield ────────────────────────────────────────────────────
-# Y = 140 * (E/P - 0.83) * P  [photons/cm]  (E/P in kV/(cm·bar))
 EL_THRESHOLD_RED   = 0.83           # kV/(cm·bar) — EL threshold in Xe
 EL_YIELD_COEFF     = 140.0          # photons/(e·cm·bar) per unit (E/P - threshold)
-PHOTONS_PER_CM     = EL_YIELD_COEFF * (EL_REDUCED_FIELD - EL_THRESHOLD_RED) * PRESSURE_BAR
 
-# ─── Diffusion coefficients ──────────────────────────────────────
-# σ_T per step = DIFF_COEFF * sqrt(Δz)
-# Higher diffusion at low field (drift), lower at high field (EL)
-DIFF_TRANS_DRIFT   = 0.05           # cm/√cm — drift region (100 V/cm)
-DIFF_TRANS_EL      = 0.01           # cm/√cm — EL region (4800 V/cm)
+# ─── Hole geometry (from COMSOL analysis) ───────────────────────
+HOLE_RADIUS_CM     = 0.25           # 2.5 mm
+HOLE_HEIGHT_CM     = 0.30           # 3 mm plate thickness (EL gap)
+HOLE_PITCH_CM      = 1.00           # 10 mm hexagonal pitch
 
-# ─── Simulation parameters ───────────────────────────────────────
+# ─── Drift geometry ────────────────────────────────────────────
+Y_ANODE            = 0.0            # y of anode mesh
+Y_PLATE_TOP        = HOLE_HEIGHT_CM # y of top electrode (~3 mm)
+Y_ELECTRON_START   = 1.0            # y where electrons start (10 mm)
+
+# ─── Diffusion coefficients ────────────────────────────────────
+DIFF_TRANS_DRIFT   = 0.05           # cm/√cm — drift region (~100 V/cm)
+DIFF_TRANS_EL      = 0.01           # cm/√cm — EL region (~4700 V/cm)
+
+# ─── Simulation parameters ─────────────────────────────────────
 N_ELECTRONS        = 10000
-DISK_RADIUS_CM     = HOLE_PITCH_CM - HOLE_RADIUS_CM  # 0.75 cm — no electron over neighbor hole
-STEP_SIZE_CM       = 0.002          # Δz per step [cm]
+DISK_RADIUS_CM     = HOLE_PITCH_CM  # 1.0 cm — covers full Voronoi cell
+STEP_SIZE_CM       = 0.002          # Δy per step [cm]
 N_TRAJECTORY_SAVE  = 40             # trajectory points saved per electron
 SEED               = 42
 
@@ -67,127 +58,137 @@ def make_hex_holes(pitch, n_rings=2):
             for k in range(ring):
                 angle1 = np.pi / 3 * (i + 2)
                 cx = ring * pitch * np.cos(angle0) + k * pitch * np.cos(angle1)
-                cy = ring * pitch * np.sin(angle0) + k * pitch * np.sin(angle1)
-                centres.append((cx, cy))
+                cz = ring * pitch * np.sin(angle0) + k * pitch * np.sin(angle1)
+                centres.append((cx, cz))
     return np.array(centres)
 
 
-def nearest_hole(x, y, hole_centres):
+def nearest_hole(xp, zp, hole_centres):
     """Return distance to nearest hole centre and its index."""
-    dx = hole_centres[:, 0] - x
-    dy = hole_centres[:, 1] - y
-    d2 = dx**2 + dy**2
+    dx = hole_centres[:, 0] - xp
+    dz = hole_centres[:, 1] - zp
+    d2 = dx**2 + dz**2
     idx = np.argmin(d2)
     return np.sqrt(d2[idx]), idx
 
 
-def simulate_electron(x0, y0, hole_centres, rng):
+def simulate_electron(x0, z0, field_map, hole_centres, rng):
     """
-    Simulate one electron drifting from z=Z_ELECTRON_START downward.
+    Simulate one electron drifting from y=Y_ELECTRON_START toward y=0.
 
-    Two regions:
-      - Drift (z > HOLE_HEIGHT): field=100 V/cm, diffusion only, no EL
-      - Hole  (0 < z < HOLE_HEIGHT): field=4800 V/cm, EL production
-
-    Electron stops if:
-      - It reaches z=0 (SiPM) — collected
-      - At z=HOLE_HEIGHT, it's outside the hole — hits anode plate
-      - Inside hole, r > HOLE_RADIUS — hits wall
+    At each step:
+      - Get E(x', y, z') from the COMSOL field map
+      - Advance y by -STEP_SIZE_CM
+      - Compute transverse displacement from field ratios: dx = (Ex/Ey)*dy
+      - Add Gaussian diffusion in x' and z'
+      - Check boundary conditions (hole wall, anode plate, SiPM)
     """
-    z = Z_ELECTRON_START
-    x, y = x0, y0
-    steps_x, steps_y, steps_z = [float(x)], [float(y)], [float(z)]
+    y = Y_ELECTRON_START
+    xp, zp = x0, z0
+    steps_x, steps_z, steps_y = [float(xp)], [float(zp)], [float(y)]
     excitations = []
 
-    # Total steps
-    n_steps_drift = int(DRIFT_LENGTH_CM / STEP_SIZE_CM)
-    n_steps_hole = int(HOLE_HEIGHT_CM / STEP_SIZE_CM)
-    n_steps_total = n_steps_drift + n_steps_hole
+    n_steps_total = int(Y_ELECTRON_START / STEP_SIZE_CM)
     save_every = max(1, n_steps_total // N_TRAJECTORY_SAVE)
 
     step_count = 0
     entered_hole = False
     hit_wall = False
     reached_sipm = False
+    hole_idx = -1
 
-    # ── Phase 1: Drift region (z from Z_ELECTRON_START down to Z_HOLE_TOP) ──
-    for i in range(n_steps_drift):
-        sigma_t = DIFF_TRANS_DRIFT * np.sqrt(STEP_SIZE_CM)
-        x += rng.normal(0, sigma_t)
-        y += rng.normal(0, sigma_t)
-        z -= STEP_SIZE_CM
+    dy = -STEP_SIZE_CM  # negative: drifting toward y=0
+
+    while y > 0 and not hit_wall:
+        # Get E-field
+        Ex, Ey, Ez = field_map.get_E(xp, y, zp)
+
+        # Avoid division by zero
+        if abs(Ey) < 1.0:
+            Ey_safe = -1.0  # fallback: small drift field
+        else:
+            Ey_safe = Ey
+
+        # Transverse displacement from field
+        dx_field = (Ex / Ey_safe) * dy
+        dz_field = (Ez / Ey_safe) * dy
+
+        # Diffusion
+        in_hole = (y < Y_PLATE_TOP) and entered_hole
+        sigma_t = DIFF_TRANS_EL if in_hole else DIFF_TRANS_DRIFT
+        sigma = sigma_t * np.sqrt(STEP_SIZE_CM)
+        dx_diff = rng.normal(0, sigma)
+        dz_diff = rng.normal(0, sigma)
+
+        # Update position
+        xp += dx_field + dx_diff
+        zp += dz_field + dz_diff
+        y += dy
+
+        if y < 0:
+            y = 0.0
 
         step_count += 1
-        if step_count % save_every == 0:
-            steps_x.append(float(x))
-            steps_y.append(float(y))
-            steps_z.append(float(z))
 
-    # ── Check if electron enters hole at z = HOLE_HEIGHT ──
-    dist_to_center = np.sqrt(x**2 + y**2)  # distance to central hole
-    # Find nearest hole
-    dist_nearest, hole_idx = nearest_hole(x, y, hole_centres)
-
-    if dist_nearest < HOLE_RADIUS_CM:
-        entered_hole = True
-        # Shift coordinates so hole centre is at (0,0) for excitation points
-        hx, hy = hole_centres[hole_idx]
-        x_rel = x - hx
-        y_rel = y - hy
-
-        # ── Phase 2: Inside hole (z from HOLE_HEIGHT down to 0) ──
-        for i in range(n_steps_hole):
-            sigma_t = DIFF_TRANS_EL * np.sqrt(STEP_SIZE_CM)
-            x += rng.normal(0, sigma_t)
-            y += rng.normal(0, sigma_t)
-            x_rel += x - (steps_x[-1] if steps_x else x0)  # track relative motion
-            y_rel = y - hy
-            x_rel = x - hx
-            z -= STEP_SIZE_CM
-
-            # Check wall hit
-            r_rel = np.sqrt((x - hx)**2 + (y - hy)**2)
-            if r_rel >= HOLE_RADIUS_CM:
-                hit_wall = True
-                step_count += 1
-                steps_x.append(float(x))
-                steps_y.append(float(y))
-                steps_z.append(float(z))
+        # ── Check if entering hole ──
+        if not entered_hole and y <= Y_PLATE_TOP:
+            dist_nearest, hole_idx = nearest_hole(xp, zp, hole_centres)
+            if dist_nearest < HOLE_RADIUS_CM:
+                entered_hole = True
+            else:
+                # Hits anode plate outside hole
                 break
 
-            # EL excitation — photons proportional to dz
-            n_ph = rng.poisson(PHOTONS_PER_CM * STEP_SIZE_CM)
-            if n_ph > 0:
-                excitations.append({
-                    "x": float(x - hx),  # relative to hole centre
-                    "y": float(y - hy),
-                    "z": float(z),        # z from SiPM
-                    "n_photons": int(n_ph)
-                })
-
-            step_count += 1
-            if step_count % save_every == 0:
-                steps_x.append(float(x))
+        # ── Inside hole: check wall ──
+        if entered_hole and y <= Y_PLATE_TOP:
+            hx, hz = hole_centres[hole_idx]
+            r_rel = np.sqrt((xp - hx)**2 + (zp - hz)**2)
+            if r_rel >= HOLE_RADIUS_CM:
+                hit_wall = True
+                steps_x.append(float(xp))
+                steps_z.append(float(zp))
                 steps_y.append(float(y))
-                steps_z.append(float(z))
+                break
 
-        if not hit_wall:
-            reached_sipm = True
+            # EL photon production
+            E_mag = np.sqrt(Ex**2 + Ey**2 + Ez**2)  # V/cm
+            E_reduced = E_mag / (PRESSURE_BAR * 1e3)  # kV/(cm·bar)
+            if E_reduced > EL_THRESHOLD_RED:
+                photons_per_cm = EL_YIELD_COEFF * (E_reduced - EL_THRESHOLD_RED) * PRESSURE_BAR
+                n_ph = rng.poisson(photons_per_cm * STEP_SIZE_CM)
+                if n_ph > 0:
+                    excitations.append({
+                        "x": float(xp - hx),
+                        "z": float(zp - hz),
+                        "y": float(y),
+                        "n_photons": int(n_ph)
+                    })
+
+        # Save trajectory point
+        if step_count % save_every == 0:
+            steps_x.append(float(xp))
+            steps_z.append(float(zp))
+            steps_y.append(float(y))
+
+    if entered_hole and not hit_wall and y <= 0:
+        reached_sipm = True
 
     # Final position
-    steps_x.append(float(x))
+    steps_x.append(float(xp))
+    steps_z.append(float(zp))
     steps_y.append(float(y))
-    steps_z.append(float(z))
+
+    dist_nearest, nearest_idx = nearest_hole(xp, zp, hole_centres)
 
     total_photons = sum(e["n_photons"] for e in excitations)
 
     return {
         "x0": float(x0),
-        "y0": float(y0),
-        "z0": float(Z_ELECTRON_START),
-        "x_final": float(x),
+        "z0": float(z0),
+        "y0": float(Y_ELECTRON_START),
+        "x_final": float(xp),
+        "z_final": float(zp),
         "y_final": float(y),
-        "z_final": float(z),
         "entered_hole": bool(entered_hole),
         "hit_wall": bool(hit_wall),
         "reached_sipm": bool(reached_sipm),
@@ -196,28 +197,32 @@ def simulate_electron(x0, y0, hole_centres, rng):
         "total_photons": int(total_photons),
         "trajectory": {
             "x": steps_x,
-            "y": steps_y,
             "z": steps_z,
+            "y": steps_y,
         },
         "excitation_points": excitations,
     }
 
 
 def main():
+    print("Loading COMSOL field map...")
+    field_map = FieldMap()
+
     rng = np.random.default_rng(SEED)
     hole_centres = make_hex_holes(HOLE_PITCH_CM, n_rings=2)
+    print(f"Hexagonal lattice: {len(hole_centres)} holes")
 
     # Random initial positions in disk of radius DISK_RADIUS_CM
-    # Uniform in disk: r = R * sqrt(U), theta = 2π * V
     r = DISK_RADIUS_CM * np.sqrt(rng.uniform(0, 1, N_ELECTRONS))
     theta = rng.uniform(0, 2 * np.pi, N_ELECTRONS)
     x0s = r * np.cos(theta)
-    y0s = r * np.sin(theta)
+    z0s = r * np.sin(theta)
 
     electrons = []
-    for i, (x0, y0) in enumerate(zip(x0s, y0s)):
-        print(f"  Simulating electron {i+1}/{N_ELECTRONS}...", end="\r", flush=True)
-        e = simulate_electron(x0, y0, hole_centres, rng)
+    for i, (x0, z0) in enumerate(zip(x0s, z0s)):
+        if (i + 1) % 100 == 0 or i == 0:
+            print(f"  Electron {i+1}/{N_ELECTRONS}...", end="\r", flush=True)
+        e = simulate_electron(x0, z0, field_map, hole_centres, rng)
         e["electron_id"] = i
         electrons.append(e)
     print(f"\n  Done. {N_ELECTRONS} electrons simulated.")
@@ -240,18 +245,13 @@ def main():
         print(f"  Avg photons/collected e⁻: {avg_ph:.1f}")
 
     metadata = {
-        "description": "NEXT honeycomb cell EL simulation",
+        "description": "NEXT honeycomb cell EL simulation (COMSOL field map)",
         "pressure_bar": PRESSURE_BAR,
-        "el_reduced_field_kv_cm_bar": EL_REDUCED_FIELD,
-        "el_field_v_cm": EL_FIELD_V_CM,
-        "drift_field_v_cm": DRIFT_FIELD_V_CM,
         "hole_radius_cm": HOLE_RADIUS_CM,
         "hole_height_cm": HOLE_HEIGHT_CM,
         "hole_pitch_cm": HOLE_PITCH_CM,
-        "z_electron_start_cm": Z_ELECTRON_START,
-        "z_hole_top_cm": Z_HOLE_TOP,
-        "drift_length_cm": DRIFT_LENGTH_CM,
-        "photons_per_cm": round(PHOTONS_PER_CM, 2),
+        "y_electron_start_cm": Y_ELECTRON_START,
+        "y_plate_top_cm": Y_PLATE_TOP,
         "diff_trans_drift": DIFF_TRANS_DRIFT,
         "diff_trans_el": DIFF_TRANS_EL,
         "step_size_cm": STEP_SIZE_CM,
